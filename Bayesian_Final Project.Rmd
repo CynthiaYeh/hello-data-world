@@ -1,0 +1,193 @@
+---
+title: "Bayesain Modeling Final Project"
+author: "Yu-Hsin Yeh"
+date: "5/16/2020"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/cynthia/Desktop/bayes/final")
+options(mc.cores = parallel::detectCores()) 
+```
+
+```{r read files, message = FALSE}
+library(readr)
+games <- read_csv("./appstore_games.csv")
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(brms)
+library(tidyverse)
+library(purrr)
+library(ggthemes)
+library(MASS)
+library(bayesplot)
+```
+
+## Data Exploration
+In this project, we are going to evaluate the popularity of mobile strategy games from the App store. The data contains information of 17,007 strategy games on the Apple App Store, which were collected on August 3rd, 2019. The variables - price, In-app purchase option, age rating, number of languages- are going to explore the prediction of popularity. 
+
+```{r}
+#explore the dataset
+glimpse(games)
+summary(games$`User Rating Count`) # Count is extremely skewed
+summary(games$Price)
+sum(is.na(games$`In-app Purchases`))
+table(games$`Age Rating`)
+sum(is.na(games$Languages))
+summary(games$Size)
+```
+
+
+## Data Wrangling
+There 17,007 overall observations in the dataset. However, we found that 9,446 of the user rating count is NAs. We removed the missing values, resulting 7,561 observations left in the study. For in app purchases, it is originally categorized as different price options in the individual games. We recoded them as a dummy variable to represent if we can purchase features in the app or not. Also, the age rating is converted into ordinal and the price is taken log transformation. 
+
+```{r, echo = T}
+games <- games %>% 
+        mutate(`Average User Rating` = ifelse(is.na(`Average User Rating`), 0, `Average User Rating`), 
+              # Replace NA with 0 for average user rating
+               rating_count = ifelse(is.na(`User Rating Count`), 0, `User Rating Count`), 
+               # Replace NA with 0 and log transformation for rating count
+               Log_price = ifelse(is.na(`Price`), 0, log(`Price` + 1)), # Log transformation for price
+               In_app_purch_bi = as.factor(ifelse(sapply(lapply(strsplit(games$`In-app Purchases`, ','), as.numeric), sum) 
+                                                  %in% c(NA, 0), 0, 1)), # Parse in-app purchase and convert to binarary (Y/N)
+               `Age Rating` = ordered(gsub("\\+","",games$`Age Rating`), levels = c(4, 9, 12, 17)),
+               # Convert age rating to ordinal
+               Multi_languages = as.factor(ifelse(sapply(games$Languages, function (x) {str_count(x, ',') + 1}) 
+                                        %in% c(NA, 1, 2), 0, 1)), # 
+               Size = ifelse(is.na(Size), 0, log(Size))) # Log transformation for size
+
+table(games$`Average User Rating` == 0 & is.na(games$`User Rating Count`)) #9446 user rating = 0 and no user rated
+
+games$AgeRate <- games$`Age Rating`
+
+#Remove the NAs
+games <- games %>%
+  filter(games$`Average User Rating` != 0)
+```
+
+##  Outcome of interest
+The outcome of interest is the popularity among different traits of mobile games. To define popularity of a game, we use user rating count to represent the feature. We hypothesize that if a game is more popular, there will be more users rating for the games. Since the count number for users are discrete, we will employ Poisson distribution for the regression analysis.
+
+## Prior Predictive Distribution Equation
+
+$$
+  \alpha \thicksim \mathcal{N}\left(m_\alpha, s_\alpha\right) 
+$$
+$$
+\beta_1 \thicksim \mathcal{N}\left(m_{\beta_1}, s_{\beta_1}\right) 
+$$
+$$
+\beta_2 \thicksim \mathcal{N}\left(m_{\beta_2}, s_{\beta_2}\right) \\
+$$
+$$
+\beta_3 \thicksim \mathcal{N}\left(m_{\beta_3}, s_{\beta_3}\right) \\
+$$
+$$
+\beta_4 \thicksim \mathcal{N}\left(m_{\beta_4}, s_{\beta_4}\right) \\
+$$
+$$
+\forall n: \eta_n = \alpha + \beta_1 \times \log Price + \beta_2 \times Age Rating + \beta_3 \times In App Purchase + \beta_4 \times Multiple Languages \\
+$$
+$$
+\forall n: \mu_n = e^{\eta_n} \\
+$$
+$$
+\forall n: Popularity_ \thicksim \mathcal{Poisson}\left(\mu_n\right)
+$$
+
+## Priors and Prior Predictive Distribution
+
+```{r poisson}
+summary(games$`User Rating Count`)
+sd(games$`User Rating Count`)
+```
+
+We observe that the user rating count is highly left-skewed.
+
+```{r}
+get_prior(rating_count ~  Log_price + AgeRate + In_app_purch_bi + Multi_languages, data = games, family = poisson)
+
+priors <- prior(normal(3, 10), class = "Intercept") + prior(normal(0, 1), class = "b")
+```
+
+There are no proper priors for the model.
+
+```{r, cache = TRUE, results = "hide", message = FALSE}
+#Poisson distribution
+draws <- brm(rating_count ~ Log_price + AgeRate + In_app_purch_bi + Multi_languages, data = games, prior = priors, sample_prior = "only", family = poisson, seed = 1022)
+mu <- pp_expect(draws, nsamples = 2000)
+```
+
+```{r result}
+summary(draws)
+#draws from prior distribution
+summary(apply(mu, MARGIN = 2, FUN = min))
+summary(apply(mu, MARGIN = 2, FUN = max))
+summary(apply(mu, MARGIN = 2, FUN = median))
+summary(apply(mu, MARGIN = 2, FUN = mean))
+summary(apply(mu, MARGIN = 2, FUN = IQR))
+```
+
+The draws from the prior predictive distribution are quite uniform, considering that the distribution is highly skewed.
+
+## Posterior distribution
+
+Going forth, we condition on the data to conduct the posterior predictive distribution.
+
+```{r, cache = TRUE, results = "hide", message = FALSE, dependson=draws}
+post <- update(draws, sample_prior = "no")
+```
+
+```{r}
+post
+
+hypothesis(post, hypothesis = "Log_price < 1")
+
+#draws from posterior distribution
+mu <- pp_expect(post, nsamples = 2000)
+summary(apply(mu, MARGIN = 2, FUN = min))
+summary(apply(mu, MARGIN = 2, FUN = max))
+summary(apply(mu, MARGIN = 2, FUN = median))
+summary(apply(mu, MARGIN = 2, FUN = mean))
+summary(apply(mu, MARGIN = 2, FUN = IQR))
+```
+
+After conditioning on the data, we found that the distribution are more variant, which makes sense since that the dataset contains many observations. Also, the estimation is much lower than the prior distribution.
+
+## Alternative Model - Negative Binomial Model
+```{r, cache = TRUE, results = "hide", message = FALSE, dependson=draws}
+priors_nb <- prior(normal( 6,   10), class = "b") + prior(normal(0 , 3), class = "Intercept") + prior(exponential(1), class = "shape")
+post_nb <- update(post, prior = priors_nb, family = negbinomial)
+```
+
+```{r}
+post_nb
+```
+
+Because the over-dispersion problem, which is common in poisson distribution, we chose the negative binomial model as our alternative model. And we did the model comparison in below.
+
+## Model Comparison
+```{r}
+pairs(post$fit, las = 1)
+
+loo(post)
+plot(loo(post))
+
+loo(post_nb) 
+plot(loo(post_nb), label_points = TRUE)
+
+y <- games$rating_count
+yrep_poisson <- posterior_predict(post, draws = 500)
+yrep_nb <- posterior_predict(post_nb, draws = 500)
+
+color_scheme_set("brightblue")
+ppc_stat(y, yrep_poisson, stat = "mean")
+ppc_stat(y, yrep_nb, stat = "mean")
+```
+
+The paris plot shows that the in app purchase options is the best predictor for our outcome of interest. Comparing to the poisson model, the negative binomial model is a better fit for our data, since there are only 7 problematic observations (with Pareto k > 0.7). Also, the IC value is much lower than the poisson model. However, it is worth noticing that the poisson model better predicts the mean of the user rating count thant the negative binomial model.
